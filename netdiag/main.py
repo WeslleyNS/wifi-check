@@ -20,6 +20,19 @@ from typing import NoReturn
 from netdiag.orchestrator import Orchestrator
 from netdiag.utils.platform import detect_platform, check_privileges
 
+import warnings
+
+# Ignorar ResourceWarning de proactor transport do asyncio no Python 3.13 Windows
+warnings.filterwarnings("ignore", category=ResourceWarning)
+
+# Silenciar exceções ignoradas no __del__ de transportes asyncio fechados durante shutdown
+def _silence_unraisable(unraisable: sys.UnraisableHookArgs) -> None:
+    if issubclass(unraisable.exc_type, (ValueError, ResourceWarning)):
+        return
+    sys.__unraisablehook__(unraisable)
+
+sys.unraisablehook = _silence_unraisable
+
 # Forçar UTF-8 no stdout/stderr para evitar UnicodeEncodeError no Windows (cp1252)
 if hasattr(sys.stdout, "reconfigure"):
     try:
@@ -36,6 +49,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     datefmt="%Y-%m-%dT%H:%M:%S",
+    stream=sys.stdout,
 )
 logger = logging.getLogger("netdiag.main")
 
