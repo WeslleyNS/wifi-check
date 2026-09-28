@@ -10,6 +10,7 @@ Produz:
 
 from __future__ import annotations
 
+import html
 import json
 import logging
 import os
@@ -17,6 +18,13 @@ import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+
+
+def _esc(val: Any) -> str:
+    """Escapa dados dinâmicos para prevenir vulnerabilidades XSS no relatório HTML."""
+    if val is None:
+        return "—"
+    return html.escape(str(val))
 
 from netdiag.models import (
     DiagnosticReport,
@@ -367,6 +375,14 @@ class ReportGenerator:
   </div>
 </details>
 
+<!-- Driver Wi-Fi -->
+<details open>
+  <summary>💻 Driver Wi-Fi</summary>
+  <div class="section-body">
+    {self._html_driver_section(report)}
+  </div>
+</details>
+
 <!-- Histórico de Desconexões -->
 <details open>
   <summary>📡 Histórico de Desconexões (Módulo 1)</summary>
@@ -603,7 +619,7 @@ class ReportGenerator:
             raw_html = (
                 "<details style='margin-top:12px'>"
                 "<summary style='cursor:pointer;color:#94a3b8;font-size:12px'>Tabela ARP bruta</summary>"
-                f"<pre>{arp.raw_arp_table[:3000]}</pre>"
+                f"<pre>{_esc(arp.raw_arp_table[:3000])}</pre>"
                 "</details>"
             )
 
@@ -631,15 +647,35 @@ class ReportGenerator:
         )
 
         return f"""<div class="kv-grid">
-  <span class="kv-key">Interface</span><span class="kv-val">{iface.interface_name or '—'}</span>
-  <span class="kv-key">SSID</span><span class="kv-val">{iface.ssid or '—'}</span>
-  <span class="kv-key">BSSID</span><span class="kv-val" style="font-family:monospace">{iface.bssid or '—'}</span>
+  <span class="kv-key">Interface</span><span class="kv-val">{_esc(iface.interface_name)}</span>
+  <span class="kv-key">SSID</span><span class="kv-val">{_esc(iface.ssid)}</span>
+  <span class="kv-key">BSSID</span><span class="kv-val" style="font-family:monospace">{_esc(iface.bssid)}</span>
   <span class="kv-key">Sinal (RSSI)</span>
   <span class="kv-val" style="color:{rssi_color};font-weight:700">{f'{iface.rssi_dbm} dBm' if iface.rssi_dbm is not None else '—'}</span>
   <span class="kv-key">Canal</span><span class="kv-val">{iface.channel or '—'}</span>
   <span class="kv-key">Banda</span><span class="kv-val">{iface.band or '—'}</span>
   <span class="kv-key">Autenticação</span><span class="kv-val">{iface.auth_type or '—'}</span>
   <span class="kv-key">Método de coleta</span><span class="kv-val" style="color:#64748b;font-size:12px">{iface.collection_method}</span>
+</div>"""
+
+    def _html_driver_section(self, report: DiagnosticReport) -> str:
+        """Gera seção do driver Wi-Fi."""
+        if not report.passive_result or not report.passive_result.driver_info:
+            return "<p style='color:#94a3b8'>Informações de driver não disponíveis.</p>"
+
+        driver = report.passive_result.driver_info
+        outdated_html = ""
+        if driver.is_outdated:
+            outdated_html = " <span class='badge badge-warn' style='margin-left: 8px'>DESATUALIZADO (>2 anos)</span>"
+        elif driver.is_outdated is False:
+            outdated_html = " <span class='badge badge-ok' style='margin-left: 8px'>Atualizado</span>"
+            
+        return f"""<div class="kv-grid">
+  <span class="kv-key">Adaptador</span><span class="kv-val">{_esc(driver.adapter_name)}</span>
+  <span class="kv-key">Fabricante</span><span class="kv-val">{_esc(driver.provider)}</span>
+  <span class="kv-key">Versão</span><span class="kv-val">{_esc(driver.version)}</span>
+  <span class="kv-key">Data do Driver</span><span class="kv-val">{_esc(driver.date_str)}{outdated_html}</span>
+  <span class="kv-key">Arquivo INF</span><span class="kv-val" style="font-family:monospace;font-size:12px">{_esc(driver.inf_file)}</span>
 </div>"""
 
     def _html_correlated_events_section(self, report: DiagnosticReport) -> str:
@@ -654,7 +690,7 @@ class ReportGenerator:
   <td style='font-family:monospace;font-size:12px;color:#94a3b8'>{ce.event.timestamp.strftime('%H:%M:%S')}</td>
   <td><span class='badge' style='background:{sev_color}22;color:{sev_color}'>{ce.event.severity.upper()}</span></td>
   <td>ID {ce.event.event_id}</td>
-  <td style='font-size:12px'>{ce.event.description[:100]}</td>
+  <td style='font-size:12px'>{_esc(ce.event.description[:100])}</td>
   <td style='font-family:monospace;font-size:12px;color:#64748b'>{ce.related_metric}</td>
   <td style='color:#94a3b8'>±{ce.time_delta_s}s</td>
 </tr>""")
@@ -692,9 +728,9 @@ class ReportGenerator:
             
             rows.append(f"""<tr>
   <td style='font-family:monospace;font-size:11px;white-space:nowrap;color:#94a3b8'>{time_str}</td>
-  <td><strong>{disc.ssid or '?'}</strong><br><span style='font-size:10px;color:#64748b'>{disc.bssid or '?'}</span></td>
+  <td><strong>{_esc(disc.ssid) if disc.ssid else '?'}</strong><br><span style='font-size:10px;color:#64748b'>{_esc(disc.bssid) if disc.bssid else '?'}</span></td>
   <td><span class='badge' style='background:{sev_color}22;color:{sev_color}'>{disc.cause.value}</span></td>
-  <td style='font-size:12px;color:#94a3b8'>{disc.raw_reason}</td>
+  <td style='font-size:12px;color:#94a3b8'>{_esc(disc.raw_reason)}</td>
   <td style='font-family:monospace;font-size:12px'>{downtime}</td>
 </tr>
 <tr style='background-color: transparent;'>
@@ -725,7 +761,7 @@ class ReportGenerator:
             rows.append(f"""<tr>
   <td style='font-family:monospace;font-size:11px;white-space:nowrap;color:#94a3b8'>{ev.timestamp.strftime('%Y-%m-%d %H:%M:%S')}</td>
   <td><span class='badge' style='background:{sev_color}22;color:{sev_color}'>{ev.event_id or '?'}</span></td>
-  <td style='font-size:12px'>{ev.description[:150]}</td>
+  <td style='font-size:12px'>{_esc(ev.description[:150])}</td>
 </tr>""")
 
         return f"""<p style='margin-bottom:12px'>Eventos brutos do adaptador Wi-Fi.{source_badge}</p>

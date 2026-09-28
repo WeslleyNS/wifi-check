@@ -81,7 +81,8 @@ O NetDiag roda **3 módulos em paralelo** e cruza os resultados:
 | "Abre alguns sites, outros não" | Falha específica de DNS ou bloqueio de TCP 443 |
 | "Conectado no Wi-Fi mas sem internet" | Gateway acessível, WAN sem resposta → roteador/ISP |
 | "Totalmente sem acesso" | Falha L2 — problema no adaptador ou no AP |
-| "Driver nunca atualizado" | Data do driver + flag de desatualizado (>2 anos) |
+| "Driver nunca atualizado" | Data do driver + flag de desatualizado (>2 anos) com penalidade na nota |
+| "Wi-Fi lento ou com interferência" | Avalia uso indevido da banda 2.4 GHz quando o sinal é excelente (sugere 5 GHz) |
 
 ---
 
@@ -158,6 +159,8 @@ sudo python3 run.py doctor
 > Com privilégios elevados, o NetDiag acessa logs detalhados de evento WLAN (Windows)
 > e dados mais precisos de interface via `wdutil` (macOS).
 
+> **Aviso macOS — SSID `<redacted>`**: Se o nome da rede (SSID) aparecer como `<redacted>`, o seu aplicativo de Terminal não tem permissão de Localização. Para corrigir, vá em *Preferências do Sistema > Privacidade e Segurança > Serviços de Localização* e ative para o seu Terminal.
+
 ---
 
 ## 🔌 Requisitos
@@ -226,12 +229,22 @@ pyinstaller netdiag-macos.spec
 
 ## 🔧 Integração Zabbix (monitoramento corporativo)
 
-O modo `collect --daemon` grava um JSONL rotativo que pode ser lido pelo agente Zabbix:
+Para monitoramento em produção, evite salvar arquivos na área de trabalho. Inicie o daemon especificando um diretório de logs do sistema (`--output-dir`):
+
+```bash
+# Windows (rodando como serviço/tarefa agendada)
+python run.py collect --daemon --interval 60 --output-dir "C:\ProgramData\NetDiag"
+
+# macOS / Linux
+python run.py collect --daemon --interval 60 --output-dir "/var/log/netdiag"
+```
+
+No Zabbix Agent, configure o UserParameter para ler a última linha do JSONL:
 
 ```ini
-# zabbix_agent2.conf
-UserParameter=netdiag.verdict,python3 -c "import json,pathlib; lines=[l for l in pathlib.Path(r'C:\Users\Public\Desktop\NetDiag-Logs\netdiag-collect.jsonl').read_text().splitlines() if l]; print(json.loads(lines[-1]).get('verdict','UNKNOWN'))"
-UserParameter=netdiag.health_score,python3 -c "import json,pathlib; lines=[l for l in pathlib.Path(r'C:\Users\Public\Desktop\NetDiag-Logs\netdiag-collect.jsonl').read_text().splitlines() if l]; print(json.loads(lines[-1]).get('health_score',0))"
+# zabbix_agent2.conf (Exemplo Windows)
+UserParameter=netdiag.verdict,python3 -c "import json,pathlib; lines=[l for l in pathlib.Path(r'C:\ProgramData\NetDiag\netdiag-collect.jsonl').read_text().splitlines() if l]; print(json.loads(lines[-1]).get('verdict','UNKNOWN'))"
+UserParameter=netdiag.health_score,python3 -c "import json,pathlib; lines=[l for l in pathlib.Path(r'C:\ProgramData\NetDiag\netdiag-collect.jsonl').read_text().splitlines() if l]; print(json.loads(lines[-1]).get('health_score',0))"
 ```
 
 ---

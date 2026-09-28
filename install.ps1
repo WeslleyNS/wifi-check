@@ -34,16 +34,31 @@ Write-Host ("Python detectado: " + $pyVersion) -ForegroundColor Green
 # ---------------------------------------------------------------------------
 # 2. Baixar o projeto
 # ---------------------------------------------------------------------------
+$VERSION = "v0.1.0"
+$EXPECTED_HASH = "" # Opcional: preencha com o hash SHA256 do ZIP para habilitar validacao rigorosa
+
 $tmpDir = Join-Path $env:TEMP ("netdiag-" + (Get-Random))
 New-Item -ItemType Directory -Path $tmpDir | Out-Null
 $zipPath = Join-Path $tmpDir "netdiag.zip"
-$projectDir = Join-Path $tmpDir "wifi-check-main"
+$folderName = "wifi-check-" + $VERSION.TrimStart('v')
+$projectDir = Join-Path $tmpDir $folderName
 
-Write-Host "Baixando NetDiag Agent do GitHub..." -ForegroundColor Yellow
+Write-Host "Baixando NetDiag Agent $VERSION do GitHub..." -ForegroundColor Yellow
+$downloadUrl = "https://github.com/WeslleyNS/wifi-check/archive/refs/tags/$VERSION.zip"
 try {
-    Invoke-WebRequest -Uri "https://github.com/WeslleyNS/wifi-check/archive/refs/heads/main.zip" -OutFile $zipPath -UseBasicParsing
+    Invoke-WebRequest -Uri $downloadUrl -OutFile $zipPath -UseBasicParsing
 } catch {
-    curl.exe -fsSL "https://github.com/WeslleyNS/wifi-check/archive/refs/heads/main.zip" -o $zipPath
+    curl.exe -fsSL $downloadUrl -o $zipPath
+}
+
+if ($EXPECTED_HASH) {
+    $fileHash = (Get-FileHash -Path $zipPath -Algorithm SHA256).Hash
+    if ($fileHash -ne $EXPECTED_HASH) {
+        Write-Host "ERRO DE SEGURANCA: Hash SHA256 do arquivo baixado ($fileHash) nao confere com o esperado." -ForegroundColor Red
+        Remove-Item -Path $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
+        exit 1
+    }
+    Write-Host "Verificacao de hash SHA256 concluida com sucesso." -ForegroundColor Green
 }
 
 Expand-Archive -Path $zipPath -DestinationPath $tmpDir -Force

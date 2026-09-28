@@ -49,7 +49,7 @@ DNS_TEST_HOSTNAME: str = "www.google.com"
 TCP_TEST_HOST: str = "www.google.com"
 TCP_TEST_PORT: int = 443
 
-PING_COUNT: int = 5
+PING_COUNT: int = 10
 PING_TIMEOUT_S: float = 5.0
 DNS_TIMEOUT_S: float = 5.0
 TCP_TIMEOUT_S: float = 5.0
@@ -447,10 +447,9 @@ class SyntheticTester:
         """
         Faz o parse da saída do comando ping (Windows e macOS/Linux).
 
-        Windows: "Mínimo = Xms, Máximo = Yms, Média = Zms"
-                 "Pacotes: Enviados = N, Recebidos = M, Perdidos = P"
-        macOS  : "rtt min/avg/max/mdev = X/Y/Z/W ms"
-                 "N packets transmitted, M received, P% packet loss"
+        ATENÇÃO: O Windows inclui mensagens ICMP de erro (ex: 'Host de destino inacessível')
+        no total de 'Recebidos =' do resumo. Por isso, os pacotes recebidos e a perda
+        são RECALCULADOS com base nas respostas reais de tempo de ida e volta (tempo=/time=).
 
         Args:
             raw: Saída bruta do comando ping.
@@ -460,58 +459,45 @@ class SyntheticTester:
             PingStats preenchido.
         """
         latencies: list[float] = []
-        packets_sent = 0
-        packets_received = 0
-        packet_loss_pct = 0.0
+        packets_sent = PING_COUNT
+        error_keywords = ("inacessível", "unreachable", "excedido", "timed out", "esgotado", "failed", "falhou")
 
-        # ---------------------------------------------------------------
-        # Windows — extrair latências individuais de cada linha de resposta
-        # ---------------------------------------------------------------
-        # Linha típica PT-BR: "Resposta de 8.8.8.8: bytes=32 tempo=15ms TTL=57"
-        # Linha EN: "Reply from 8.8.8.8: bytes=32 time=15ms TTL=57"
         for line in raw.splitlines():
+            # Se for linha de erro ICMP, ignora como resposta válida
+            if any(kw in line.lower() for kw in error_keywords):
+                continue
+
+            # Windows — "Resposta de 8.8.8.8: bytes=32 tempo=15ms TTL=57"
             m = re.search(r"tempo[<=](\d+)ms|time[<=](\d+)ms", line, re.IGNORECASE)
             if m:
                 val = m.group(1) or m.group(2)
                 latencies.append(float(val))
+                continue
 
-        # macOS/Linux — "64 bytes from ... icmp_seq=1 ttl=57 time=12.3 ms"
-        if not latencies:
-            for line in raw.splitlines():
-                m = re.search(r"time=(\d+\.?\d*)\s*ms", line, re.IGNORECASE)
-                if m:
-                    latencies.append(float(m.group(1)))
+            # macOS/Linux — "64 bytes from ... icmp_seq=1 ttl=57 time=12.3 ms"
+            m_mac = re.search(r"time=(\d+\.?\d*)\s*ms", line, re.IGNORECASE)
+            if m_mac:
+                latencies.append(float(m_mac.group(1)))
 
-        # ---------------------------------------------------------------
-        # Windows — estatísticas de pacotes
-        # PT-BR: "Pacotes: Enviados = 4, Recebidos = 4, Perdidos = 0 (0% de perda)"
-        # EN    : "Packets: Sent = 4, Received = 4, Lost = 0 (0% loss)"
-        # ---------------------------------------------------------------
+        # Extrair pacotes enviados do resumo se disponível
         for line in raw.splitlines():
             m_sent = re.search(r"enviados\s*=\s*(\d+)|sent\s*=\s*(\d+)", line, re.IGNORECASE)
-            m_recv = re.search(r"recebidos\s*=\s*(\d+)|received\s*=\s*(\d+)", line, re.IGNORECASE)
-            m_loss = re.search(r"(\d+)%\s*(?:de perda|loss)", line, re.IGNORECASE)
-
             if m_sent:
                 packets_sent = int(m_sent.group(1) or m_sent.group(2))
-            if m_recv:
-                packets_received = int(m_recv.group(1) or m_recv.group(2))
-            if m_loss:
-                packet_loss_pct = float(m_loss.group(1))
+                break
+            m_sent_mac = re.search(r"(\d+) packets? transmitted", line, re.IGNORECASE)
+            if m_sent_mac:
+                packets_sent = int(m_sent_mac.group(1))
+                break
 
-        # macOS/Linux: "4 packets transmitted, 4 received, 0% packet loss"
-        if packets_sent == 0:
-            m = re.search(r"(\d+) packets? transmitted,\s*(\d+) received", raw, re.IGNORECASE)
-            if m:
-                packets_sent = int(m.group(1))
-                packets_received = int(m.group(2))
-                m_loss = re.search(r"(\d+(?:\.\d+)?)%\s*packet loss", raw, re.IGNORECASE)
-                if m_loss:
-                    packet_loss_pct = float(m_loss.group(1))
-                elif packets_sent > 0:
-                    packet_loss_pct = (packets_sent - packets_received) / packets_sent * 100
+        # Os pacotes recebidos de fato são estritamente a quantidade de respostas válidas (latencies)
+        packets_received = len(latencies)
 
-        # Calcular estatísticas a partir das latências individuais coletadas
+        if packets_sent > 0:
+            packet_loss_pct = round(((packets_sent - packets_received) / packets_sent) * 100.0, 1)
+        else:
+            packet_loss_pct = 100.0 if packets_received == 0 else 0.0
+
         avg_ms: Optional[float] = None
         min_ms: Optional[float] = None
         max_ms: Optional[float] = None
@@ -522,14 +508,6 @@ class SyntheticTester:
             min_ms = round(min(latencies), 2)
             max_ms = round(max(latencies), 2)
             jitter = SyntheticTester._calculate_jitter(latencies)
-
-            # Recalcular perda se não parseou do texto
-            if packets_sent == 0 and latencies:
-                packets_sent = PING_COUNT
-                packets_received = len(latencies)
-                packet_loss_pct = round(
-                    (packets_sent - packets_received) / packets_sent * 100, 1
-                )
 
         return PingStats(
             target=target,
@@ -554,26 +532,31 @@ class SyntheticTester:
         NÃO usa `socket.gethostbyname` (mede cache do SO, não o resolver).
         Implementação manual do protocolo DNS sobre UDP (RFC 1035 simplificado).
 
-        Resolvers testados: 8.8.8.8, 1.1.1.1, + DNS local do sistema.
+        Resolvers testados: DNS local do sistema (prioritário) + alvos públicos (8.8.8.8, 1.1.1.1).
 
         Returns:
             DnsResult com uma DnsQueryResult por resolver, e o mais rápido identificado.
         """
         timestamp = datetime.now(tz=timezone.utc)
 
-        resolvers = list(DNS_RESOLVERS)
+        system_resolvers = await self._get_system_dns_resolvers()
 
-        # Tentar adicionar o DNS local do sistema
-        local_dns = await self._get_system_dns_resolver()
-        if local_dns and local_dns not in resolvers:
-            resolvers.append(local_dns)
+        # Montar lista de resolvers únicos (sistema primeiro, depois públicos)
+        resolvers_to_test: list[str] = list(system_resolvers)
+        for pub in DNS_RESOLVERS:
+            if pub not in resolvers_to_test:
+                resolvers_to_test.append(pub)
 
         tasks = [
             asyncio.create_task(
-                self._query_dns_raw(resolver, DNS_TEST_HOSTNAME),
+                self._query_dns_raw(
+                    resolver,
+                    DNS_TEST_HOSTNAME,
+                    is_system=(resolver in system_resolvers),
+                ),
                 name=f"dns_{resolver}",
             )
-            for resolver in resolvers
+            for resolver in resolvers_to_test
         ]
 
         queries: list[DnsQueryResult] = await asyncio.gather(*tasks)
@@ -593,6 +576,7 @@ class SyntheticTester:
         return DnsResult(
             timestamp=timestamp,
             queries=queries,
+            system_resolvers=system_resolvers,
             fastest_resolver_ip=fastest_resolver,
             avg_response_ms=avg_ms,
         )
@@ -602,6 +586,7 @@ class SyntheticTester:
         resolver_ip: str,
         hostname: str,
         timeout: float = DNS_TIMEOUT_S,
+        is_system: bool = False,
     ) -> DnsQueryResult:
         """
         Realiza uma consulta DNS tipo A via socket UDP raw (RFC 1035).
@@ -613,6 +598,7 @@ class SyntheticTester:
             resolver_ip: IP do servidor DNS a consultar.
             hostname: Nome de domínio a resolver.
             timeout: Timeout em segundos.
+            is_system: Indica se é um resolver configurado no sistema.
 
         Returns:
             DnsQueryResult com IP resolvido e tempo de resposta.
@@ -648,6 +634,7 @@ class SyntheticTester:
                     queried_hostname=hostname,
                     resolved_ip=None,
                     response_time_ms=elapsed_ms,
+                    is_system_resolver=is_system,
                     error="NXDOMAIN ou resposta vazia",
                 )
 
@@ -656,6 +643,7 @@ class SyntheticTester:
                 queried_hostname=hostname,
                 resolved_ip=resolved_ip,
                 response_time_ms=elapsed_ms,
+                is_system_resolver=is_system,
             )
 
         except asyncio.TimeoutError:
@@ -664,6 +652,7 @@ class SyntheticTester:
                 queried_hostname=hostname,
                 resolved_ip=None,
                 response_time_ms=None,
+                is_system_resolver=is_system,
                 timed_out=True,
                 error=f"Timeout ({timeout}s) ao consultar {resolver_ip}",
             )
@@ -673,6 +662,7 @@ class SyntheticTester:
                 queried_hostname=hostname,
                 resolved_ip=None,
                 response_time_ms=None,
+                is_system_resolver=is_system,
                 error=f"Erro de socket ao consultar {resolver_ip}: {exc}",
             )
         except Exception as exc:  # noqa: BLE001
@@ -681,6 +671,7 @@ class SyntheticTester:
                 queried_hostname=hostname,
                 resolved_ip=None,
                 response_time_ms=None,
+                is_system_resolver=is_system,
                 error=f"Erro inesperado: {exc}",
             )
 
@@ -788,40 +779,53 @@ class SyntheticTester:
 
         return None
 
-    async def _get_system_dns_resolver(self) -> Optional[str]:
+    async def _get_system_dns_resolvers(self) -> list[str]:
         """
-        Detecta o IP do resolver DNS configurado no sistema.
+        Detecta TODOS os IPs de resolvers DNS configurados no sistema.
 
         Windows: `ipconfig /all` — campo 'Servidores DNS' / 'DNS Servers'.
         macOS  : `/etc/resolv.conf` ou `scutil --dns`.
 
         Returns:
-            IP do primeiro resolver DNS do sistema, ou None.
+            Lista de IPs dos resolvers DNS do sistema.
         """
         if self.platform.name == Platform.WINDOWS:
             return await self._get_dns_windows()
         else:
             return await self._get_dns_macos()
 
-    async def _get_dns_windows(self) -> Optional[str]:
-        """Detecta o DNS do sistema no Windows via `ipconfig /all`."""
+    async def _get_dns_windows(self) -> list[str]:
+        """Detecta TODOS os servidores DNS no Windows via `ipconfig /all`."""
         raw = await self._run_subprocess(["ipconfig", "/all"])
         if not raw:
-            return None
+            return []
+
+        resolvers: list[str] = []
+        in_dns_section = False
 
         for line in raw.splitlines():
             lower = line.lower()
             if "servidores dns" in lower or "dns servers" in lower:
-                match = re.search(r"(\d{1,3}(?:\.\d{1,3}){3})", line)
-                if match:
-                    ip = match.group(1)
-                    # Ignorar loopback e endereços inválidos
-                    if not ip.startswith("127.") and ip != "0.0.0.0":
-                        return ip
-        return None
+                in_dns_section = True
+                matches = re.findall(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", line)
+                for ip in matches:
+                    if not ip.startswith("127.") and ip != "0.0.0.0" and ip not in resolvers:
+                        resolvers.append(ip)
+            elif in_dns_section:
+                # Se encontrar uma nova chave com ':', encerra a seção DNS
+                if ":" in line and not re.match(r"^\s*(?:\d{1,3}\.){3}\d{1,3}\s*$", line):
+                    in_dns_section = False
+                else:
+                    matches = re.findall(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", line)
+                    for ip in matches:
+                        if not ip.startswith("127.") and ip != "0.0.0.0" and ip not in resolvers:
+                            resolvers.append(ip)
 
-    async def _get_dns_macos(self) -> Optional[str]:
-        """Detecta o DNS do sistema no macOS via /etc/resolv.conf."""
+        return resolvers
+
+    async def _get_dns_macos(self) -> list[str]:
+        """Detecta TODOS os servidores DNS no macOS via /etc/resolv.conf."""
+        resolvers: list[str] = []
         try:
             import pathlib
             resolv = pathlib.Path("/etc/resolv.conf")
@@ -830,10 +834,12 @@ class SyntheticTester:
                     if line.startswith("nameserver"):
                         parts = line.split()
                         if len(parts) >= 2 and _is_valid_ipv4(parts[1]):
-                            return parts[1]
+                            ip = parts[1]
+                            if not ip.startswith("127.") and ip != "0.0.0.0" and ip not in resolvers:
+                                resolvers.append(ip)
         except Exception:  # noqa: BLE001
             pass
-        return None
+        return resolvers
 
     # -----------------------------------------------------------------------
     # L4 — TCP Handshake

@@ -39,14 +39,35 @@ echo -e "${GREEN}✔ $PY_VER detectado${NC}"
 # ---------------------------------------------------------------------------
 # 2. Baixar o projeto
 # ---------------------------------------------------------------------------
+VERSION="v0.1.0"
+EXPECTED_HASH="" # Opcional: preencha com hash SHA256 do ZIP para habilitar validação rigorosa
+
 TMP_DIR=$(mktemp -d)
 ZIP_PATH="$TMP_DIR/netdiag.zip"
-PROJECT_DIR="$TMP_DIR/wifi-check-main"
+FOLDER_NAME="wifi-check-${VERSION#v}"
+PROJECT_DIR="$TMP_DIR/$FOLDER_NAME"
 
-echo -e "${YELLOW}⬇  Baixando NetDiag Agent do GitHub...${NC}"
-curl -fsSL \
-    "https://github.com/WeslleyNS/wifi-check/archive/refs/heads/main.zip" \
-    -o "$ZIP_PATH"
+echo -e "${YELLOW}⬇  Baixando NetDiag Agent $VERSION do GitHub...${NC}"
+DOWNLOAD_URL="https://github.com/WeslleyNS/wifi-check/archive/refs/tags/$VERSION.zip"
+curl -fsSL "$DOWNLOAD_URL" -o "$ZIP_PATH"
+
+if [ -n "$EXPECTED_HASH" ]; then
+    if command -v sha256sum &>/dev/null; then
+        ACTUAL_HASH=$(sha256sum "$ZIP_PATH" | awk '{print $1}')
+    elif command -v shasum &>/dev/null; then
+        ACTUAL_HASH=$(shasum -a 256 "$ZIP_PATH" | awk '{print $1}')
+    else
+        echo -e "${YELLOW}Aviso: utilitário de hash não encontrado, ignorando verificação.${NC}"
+        ACTUAL_HASH="$EXPECTED_HASH"
+    fi
+
+    if [ "$ACTUAL_HASH" != "$EXPECTED_HASH" ]; then
+        echo -e "${RED}ERRO DE SEGURANÇA: Hash SHA256 do arquivo baixado ($ACTUAL_HASH) não confere com o esperado.${NC}"
+        rm -rf "$TMP_DIR"
+        exit 1
+    fi
+    echo -e "${GREEN}✔ Verificação de hash SHA256 concluída${NC}"
+fi
 
 unzip -q "$ZIP_PATH" -d "$TMP_DIR"
 echo -e "${GREEN}✔ Download concluído${NC}"

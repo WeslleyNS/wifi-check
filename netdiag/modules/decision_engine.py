@@ -28,19 +28,19 @@ logger = logging.getLogger("netdiag.modules.decision_engine")
 # ---------------------------------------------------------------------------
 # Limiares de decisão
 # ---------------------------------------------------------------------------
-JITTER_THRESHOLD_MS: float = 30.0       # jitter máximo aceitável
-PACKET_LOSS_THRESHOLD_PCT: float = 2.0  # perda máxima aceitável (%)
-DNS_SLOW_THRESHOLD_MS: float = 500.0    # DNS lento acima deste valor
-TCP_SLOW_THRESHOLD_MS: float = 1000.0   # TCP lento acima deste valor
+JITTER_THRESHOLD_MS: float = 30.0        # jitter máximo aceitável
+PACKET_LOSS_THRESHOLD_PCT: float = 10.0  # perda máxima aceitável (%) com 10 pacotes
+DNS_SLOW_THRESHOLD_MS: float = 500.0     # DNS lento acima deste valor
+TCP_SLOW_THRESHOLD_MS: float = 1000.0    # TCP lento acima deste valor
 
-# Janela de correlação temporal entre eventos passivos e anomalias sintéticas
-CORRELATION_WINDOW_S: float = 30.0
+# Janela de correlação temporal entre eventos passivos e anomalias sintéticas (30 minutos)
+CORRELATION_WINDOW_S: float = 1800.0
 
 # Descrições em PT-BR para cada veredito
 _VERDICT_DESCRIPTIONS: dict[VerdictCode, str] = {
     VerdictCode.OK: "Rede funcionando normalmente — todos os testes passaram",
     VerdictCode.L2_ISOLATION: (
-        "Link Down / Isolamento L2 — sem resposta do gateway. "
+        "Link Down / Isolamento L2 — sem resposta do gateway (ping e ARP falharam). "
         "Verifique cabo, adaptador Wi-Fi e roteador."
     ),
     VerdictCode.NO_WAN: (
@@ -48,8 +48,8 @@ _VERDICT_DESCRIPTIONS: dict[VerdictCode, str] = {
         "Verifique o modem/link do provedor."
     ),
     VerdictCode.DNS_FAILURE: (
-        "Degradação ou falha de resolução DNS — resolução lenta ou falhou. "
-        "Tente trocar para 1.1.1.1 ou 8.8.8.8 manualmente."
+        "Degradação ou falha de resolução DNS nos servidores configurados no sistema. "
+        "Verifique os servidores DNS locais, DHCP da rede ou contate o suporte de TI."
     ),
     VerdictCode.FIREWALL_BLOCK: (
         "Bloqueio de firewall / rota assimétrica — DNS OK mas TCP 443 falhou ou lento. "
@@ -71,12 +71,12 @@ class DecisionEngine:
     com veredito, nota de saúde e correlações causa-efeito.
 
     Hierarquia de vereditos (para na primeira falha):
-        1. Ping gateway falha         → L2_ISOLATION      (crítico)
-        2. Ping externo falha         → NO_WAN             (crítico)
-        3. DNS lento/falha            → DNS_FAILURE         (alto)
-        4. TCP 443 falha/lento        → FIREWALL_BLOCK      (alto)
-        5. Jitter > 30ms / perda > 2% → NETWORK_INSTABILITY (médio)
-        6. Tudo OK                    → OK
+        1. L2 (Gateway Ping + ARP) falha → L2_ISOLATION      (crítico)
+        2. WAN (Ping Ext + TCP 443) falha → NO_WAN             (crítico)
+        3. DNS do Sistema/Global falha   → DNS_FAILURE         (alto)
+        4. TCP 443 falha/lento           → FIREWALL_BLOCK      (alto)
+        5. Jitter > 30ms / perda > 10%   → NETWORK_INSTABILITY (médio)
+        6. Tudo OK                       → OK
     """
 
     def evaluate(
@@ -115,7 +115,36 @@ class DecisionEngine:
         else:
             verdict, description = self._apply_verdict_hierarchy(synthetic_result, errors)
 
-        health_score = self._calculate_health_score(verdict, synthetic_result)
+        if passive_result:
+            if passive_result.driver_info and passive_result.driver_info.is_outdated:
+                age = passive_result.driver_info.age_days
+                errors.append(
+                    f"Observação: Driver Wi-Fi desatualizado ({age} dias). "
+                    "Considere atualizar o driver no site do fabricante."
+                )
+
+            iface = passive_result.interface_state
+            if iface and iface.band:
+                if "2.4" in iface.band:
+                    if iface.rssi_dbm and iface.rssi_dbm >= -65:
+                        errors.append(
+                            "Atenção: A máquina está conectada na banda 2.4 GHz, apesar de apresentar um sinal excelente "
+                            f"({iface.rssi_dbm} dBm). A banda 2.4 GHz é mais lenta e sofre mais interferência. "
+                            "É altamente recomendável conectar-se à banda 5 GHz (ou superior), se o roteador suportar."
+                        )
+                    else:
+                        rssi_text = f" ({iface.rssi_dbm} dBm)" if iface.rssi_dbm else ""
+                        errors.append(
+                            "Atenção: A máquina está conectada na banda 2.4 GHz. Isso costuma ocorrer quando a máquina está "
+                            f"longe do roteador ou com obstáculos diminuindo o sinal{rssi_text}, já que o 2.4 GHz possui "
+                            "maior alcance. Ainda assim, se possível, aproxime-se e prefira a rede 5 GHz para maior velocidade."
+                        )
+                elif "5" in iface.band or "6" in iface.band:
+                    errors.append(
+                        f"Boa prática: A máquina está utilizando corretamente a banda {iface.band}, o que ajuda a garantir maior performance e menor interferência."
+                    )
+
+        health_score = self._calculate_health_score(verdict, synthetic_result, passive_result)
         health_grade = self._score_to_grade(health_score)
         correlated = self._correlate_events(passive_result, synthetic_result)
 
@@ -162,20 +191,28 @@ class DecisionEngine:
         Returns:
             Tupla (VerdictCode, descrição em PT-BR).
         """
-        # 1. L2 — Ping ao gateway
-        if not self._check_gateway_ping(synthetic):
+        # 1. L2 — Ping ao gateway OU resolução ARP
+        if not self._check_gateway_l2(synthetic):
             return VerdictCode.L2_ISOLATION, _VERDICT_DESCRIPTIONS[VerdictCode.L2_ISOLATION]
 
-        # 2. WAN — Ping a alvos externos
-        if not self._check_external_ping(synthetic):
+        # 2. WAN — Conectividade externa (Ping OU TCP 443)
+        wan_ok, icmp_blocked = self._check_wan_reachability(synthetic)
+        if not wan_ok:
             return VerdictCode.NO_WAN, _VERDICT_DESCRIPTIONS[VerdictCode.NO_WAN]
 
-        # 3. DNS
-        dns_ok, dns_slow = self._check_dns(synthetic)
-        if not dns_ok or dns_slow:
-            return VerdictCode.DNS_FAILURE, _VERDICT_DESCRIPTIONS[VerdictCode.DNS_FAILURE]
+        if icmp_blocked:
+            errors.append(
+                "Observação: Ping ICMP bloqueado para alvos externos na rede, "
+                "porém o tráfego TCP 443 (HTTPS) está funcional."
+            )
 
-        # 4. TCP
+        # 3. DNS — Checar DNS do sistema e resolvers
+        dns_ok, dns_slow, dns_msg = self._check_dns(synthetic)
+        if not dns_ok or dns_slow:
+            desc = dns_msg or _VERDICT_DESCRIPTIONS[VerdictCode.DNS_FAILURE]
+            return VerdictCode.DNS_FAILURE, desc
+
+        # 4. TCP 443
         tcp_ok, tcp_slow = self._check_tcp(synthetic)
         if not tcp_ok or tcp_slow:
             return VerdictCode.FIREWALL_BLOCK, _VERDICT_DESCRIPTIONS[VerdictCode.FIREWALL_BLOCK]
@@ -187,79 +224,111 @@ class DecisionEngine:
         # 6. Tudo OK
         return VerdictCode.OK, _VERDICT_DESCRIPTIONS[VerdictCode.OK]
 
-    def _check_gateway_ping(self, synthetic: SyntheticTestResult) -> bool:
+    def _check_gateway_l2(self, synthetic: SyntheticTestResult) -> bool:
         """
-        Verifica se o ping ao gateway padrão foi bem-sucedido.
+        Verifica se o link L2 com o gateway está funcionando.
 
-        Considera falha se: nenhum dado de gateway, ou 100% de perda de pacotes.
-
-        Args:
-            synthetic: Resultado dos testes sintéticos.
-
-        Returns:
-            True se o gateway respondeu ao ping.
+        Considera L2 OK se:
+        1. O gateway respondeu a pelo menos 1 ping, OU
+        2. A tabela ARP resolveu o MAC do gateway (gateway_mac não é None e arp_incomplete é False).
         """
-        if synthetic.ping is None or synthetic.ping.gateway is None:
-            return False
+        # Teste 1: Ping respondeu
+        if synthetic.ping and synthetic.ping.gateway:
+            if synthetic.ping.gateway.packets_received > 0:
+                return True
 
-        gw = synthetic.ping.gateway
-        if gw.error and gw.packets_received == 0:
-            return False
-
-        # Se houve ao menos 1 pacote recebido, gateway está vivo
-        return gw.packets_received > 0
-
-    def _check_external_ping(self, synthetic: SyntheticTestResult) -> bool:
-        """
-        Verifica se pelo menos um alvo externo respondeu ao ping.
-
-        Args:
-            synthetic: Resultado dos testes sintéticos.
-
-        Returns:
-            True se ao menos um alvo externo (1.1.1.1 ou 8.8.8.8) respondeu.
-        """
-        if synthetic.ping is None:
-            return False
-
-        for target in synthetic.ping.external_targets:
-            if target.packets_received > 0:
+        # Teste 2: ARP resolveu MAC do gateway
+        if synthetic.arp:
+            if synthetic.arp.gateway_mac is not None and not synthetic.arp.arp_incomplete:
+                logger.info(
+                    "Gateway não respondeu ICMP, mas MAC (%s) foi resolvido via ARP. L2 OK.",
+                    synthetic.arp.gateway_mac,
+                )
                 return True
 
         return False
 
-    def _check_dns(self, synthetic: SyntheticTestResult) -> tuple[bool, bool]:
+    def _check_wan_reachability(self, synthetic: SyntheticTestResult) -> tuple[bool, bool]:
         """
-        Verifica se o DNS está respondendo e dentro do limiar de 500ms.
+        Verifica acessibilidade à WAN (Internet).
 
-        Args:
-            synthetic: Resultado dos testes sintéticos.
+        WAN está acessível se:
+        1. Ping a alvos externos (1.1.1.1, 8.8.8.8) funcionou, OU
+        2. Handshake TCP na porta 443 (HTTPS) funcionou, OU
+        3. Consulta DNS externa retornou IP.
 
         Returns:
-            Tupla (dns_ok, dns_slow).
-            dns_ok=False → todos os resolvers falharam.
-            dns_slow=True → todos os resolvers OK mas algum > 500ms.
+            Tupla (wan_ok: bool, icmp_blocked: bool).
+        """
+        ping_external_ok = False
+        if synthetic.ping and synthetic.ping.external_targets:
+            for target in synthetic.ping.external_targets:
+                if target.packets_received > 0:
+                    ping_external_ok = True
+                    break
+
+        tcp_ok = False
+        if synthetic.tcp and synthetic.tcp.success:
+            tcp_ok = True
+
+        dns_external_ok = False
+        if synthetic.dns and synthetic.dns.queries:
+            for q in synthetic.dns.queries:
+                if not q.is_system_resolver and q.resolved_ip is not None:
+                    dns_external_ok = True
+                    break
+
+        wan_ok = ping_external_ok or tcp_ok or dns_external_ok
+        icmp_blocked = (not ping_external_ok) and tcp_ok
+
+        return wan_ok, icmp_blocked
+
+    def _check_dns(self, synthetic: SyntheticTestResult) -> tuple[bool, bool, Optional[str]]:
+        """
+        Verifica a resolução DNS no sistema e alvos públicos.
+
+        Prioriza a validação dos resolvers do sistema. Se os resolvers locais
+        estiverem falhando/lentos, aciona DNS_FAILURE mesmo que alvos públicos passem.
+
+        Returns:
+            Tupla (dns_ok: bool, dns_slow: bool, mensagem_especifica: Optional[str]).
         """
         if synthetic.dns is None or not synthetic.dns.queries:
-            return False, False
+            return False, False, None
 
+        # 1. Avaliar resolvers do sistema (locais)
+        system_queries = [q for q in synthetic.dns.queries if q.is_system_resolver]
+        if system_queries:
+            sys_successful = [
+                q for q in system_queries
+                if q.resolved_ip is not None and q.response_time_ms is not None
+            ]
+            if not sys_successful:
+                sys_ips = ", ".join(q.resolver_ip for q in system_queries)
+                msg = (
+                    f"Falha de resolução DNS nos servidores do sistema ({sys_ips}). "
+                    "Verifique os servidores DNS locais ou a equipe de TI."
+                )
+                return False, False, msg
+
+            sys_fast = [q for q in sys_successful if q.response_time_ms <= DNS_SLOW_THRESHOLD_MS]
+            if not sys_fast:
+                sys_ips = ", ".join(q.resolver_ip for q in system_queries)
+                msg = f"Servidores DNS locais ({sys_ips}) estão respondendo com latência alta (>500ms)."
+                return True, True, msg
+
+        # 2. Avaliar todos os resolvers
         successful = [
             q for q in synthetic.dns.queries
             if q.resolved_ip is not None and q.response_time_ms is not None
         ]
-
         if not successful:
-            return False, False
+            return False, False, "Nenhum servidor DNS respondeu às consultas sintéticas."
 
-        # Checar se todos estão acima do limiar (se ao menos 1 resolver for rápido, é OK)
-        fast_count = sum(
-            1 for q in successful if q.response_time_ms <= DNS_SLOW_THRESHOLD_MS
-        )
+        fast_count = sum(1 for q in successful if q.response_time_ms <= DNS_SLOW_THRESHOLD_MS)
+        dns_slow = fast_count == 0
 
-        dns_ok = True
-        dns_slow = fast_count == 0  # todos os resolvers lentos
-
-        return dns_ok, dns_slow
+        return True, dns_slow, None
 
     def _check_tcp(self, synthetic: SyntheticTestResult) -> tuple[bool, bool]:
         """
@@ -328,6 +397,7 @@ class DecisionEngine:
         self,
         verdict: VerdictCode,
         synthetic: Optional[SyntheticTestResult],
+        passive: Optional[PassiveCollectionResult] = None,
     ) -> int:
         """
         Calcula a nota de saúde (0-100) com base no veredito e nas métricas.
@@ -397,6 +467,9 @@ class DecisionEngine:
             if synthetic.tcp.handshake_time_ms > 200:
                 excess = synthetic.tcp.handshake_time_ms - 200
                 penalty += min(excess * 0.005, 5.0)
+
+        if passive and passive.driver_info and passive.driver_info.is_outdated:
+            penalty += 10.0  # Penalidade máxima de 10 pontos por driver muito antigo
 
         final_score = int(score - penalty)
         return max(0, min(100, final_score))

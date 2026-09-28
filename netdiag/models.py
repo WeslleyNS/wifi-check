@@ -345,6 +345,9 @@ class DnsQueryResult:
     response_time_ms: Optional[float]
     """Tempo de resposta em milissegundos (None em caso de timeout)."""
 
+    is_system_resolver: bool = False
+    """True se este resolver é um DNS local/configurado pelo sistema (DHCP/AD)."""
+
     timed_out: bool = False
     error: Optional[str] = None
 
@@ -356,6 +359,9 @@ class DnsResult:
 
     queries: list[DnsQueryResult] = field(default_factory=list)
     """Uma consulta por resolver testado."""
+
+    system_resolvers: list[str] = field(default_factory=list)
+    """IPs dos servidores DNS do sistema detectados."""
 
     fastest_resolver_ip: Optional[str] = None
     """IP do resolver com menor tempo de resposta."""
