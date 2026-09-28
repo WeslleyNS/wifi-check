@@ -28,6 +28,7 @@ from netdiag.modules.synthetic_tester import SyntheticTester
 from netdiag.modules.decision_engine import DecisionEngine
 from netdiag.output.report_generator import ReportGenerator
 from netdiag.output.jsonl_writer import JsonlWriter
+from netdiag.utils.platform import get_netdiag_logs_dir
 
 logger = logging.getLogger("netdiag.orchestrator")
 
@@ -122,11 +123,18 @@ class Orchestrator:
         output_file: Optional[str] = getattr(self.args, "output_file", None)
         max_size_mb: int = getattr(self.args, "max_size_mb", 10)
 
+        # Se output_file não foi especificado, salvar na pasta NetDiag-Logs do Desktop
+        if not output_file:
+            logs_dir = get_netdiag_logs_dir()
+            output_file = str(logs_dir / "netdiag-collect.jsonl")
+
         logger.info(
             "Iniciando modo 'collect --daemon' (intervalo: %ds, arquivo: %s)...",
             interval,
-            output_file or "netdiag-collect.jsonl",
+            output_file,
         )
+        print(f"\n  [DAEMON] Gravando coletas em: {output_file}")
+        print(f"  [DAEMON] Para encerrar, pressione Ctrl+C\n")
 
         writer = JsonlWriter(output_file=output_file, max_size_mb=max_size_mb)
 

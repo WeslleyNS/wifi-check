@@ -26,6 +26,7 @@ from typing import Optional
 from netdiag.models import (
     DisconnectCause,
     DisconnectRecord,
+    DriverInfo,
     PassiveCollectionResult,
     Platform,
     PlatformInfo,
@@ -170,19 +171,20 @@ class PassiveCollector:
         Executa a coleta passiva completa para o SO atual.
 
         Returns:
-            PassiveCollectionResult com estado da interface e eventos coletados.
+            PassiveCollectionResult com estado da interface, eventos e info do driver.
         """
         timestamp = datetime.now(tz=timezone.utc)
         errors: list[str] = []
 
         if self.platform.name == Platform.WINDOWS:
-            interface_state, events, events_source, errs = await self._collect_windows()
+            interface_state, events, events_source, driver_info, errs = await self._collect_windows()
         elif self.platform.name == Platform.MACOS:
-            interface_state, events, events_source, errs = await self._collect_macos()
+            interface_state, events, events_source, driver_info, errs = await self._collect_macos()
         else:
             interface_state = None
             events = []
             events_source = "unsupported"
+            driver_info = None
             errs = [f"Plataforma não suportada para coleta passiva: {self.platform.name}"]
 
         errors.extend(errs)
@@ -195,6 +197,7 @@ class PassiveCollector:
             interface_state=interface_state,
             events=events,
             disconnect_history=disconnect_history,
+            driver_info=driver_info,
             events_source=events_source,
             errors=errors,
         )
@@ -205,14 +208,14 @@ class PassiveCollector:
 
     async def _collect_windows(
         self,
-    ) -> tuple[Optional[WifiInterfaceState], list[WifiEvent], str, list[str]]:
+    ) -> tuple[Optional[WifiInterfaceState], list[WifiEvent], str, Optional[DriverInfo], list[str]]:
         """
         Executa a coleta passiva específica para Windows em paralelo.
 
-        Executa netsh e coleta de eventos simultaneamente.
+        Executa netsh (interface), eventos e info de driver simultaneamente.
 
         Returns:
-            Tupla (WifiInterfaceState, lista de eventos, fonte dos eventos, lista de erros).
+            Tupla (WifiInterfaceState, eventos, fonte, DriverInfo, lista de erros).
         """
         errors: list[str] = []
 
@@ -224,9 +227,15 @@ class PassiveCollector:
             self._windows_get_events(errors),
             name="windows_events",
         )
+        driver_task = asyncio.create_task(
+            self._windows_get_driver_info(errors),
+            name="windows_driver",
+        )
 
-        interface_state, (events, events_source) = await asyncio.gather(iface_task, events_task)
-        return interface_state, events, events_source, errors
+        interface_state, (events, events_source), driver_info = await asyncio.gather(
+            iface_task, events_task, driver_task
+        )
+        return interface_state, events, events_source, driver_info, errors
 
     # -----------------------------------------------------------------------
     # Windows — Estado da interface (netsh)
@@ -810,16 +819,17 @@ class PassiveCollector:
 
     async def _collect_macos(
         self,
-    ) -> tuple[Optional[WifiInterfaceState], list[WifiEvent], str, list[str]]:
+    ) -> tuple[Optional[WifiInterfaceState], list[WifiEvent], str, Optional[DriverInfo], list[str]]:
         """
         Executa a coleta passiva específica para macOS em paralelo.
 
         Fontes:
         - Estado da interface: `wdutil info` (requer sudo) ou system_profiler (fallback).
         - Logs de evento: `log show --predicate 'subsystem == "com.apple.wifi"' --last 30m`.
+        - Driver: `system_profiler SPAirPortDataType -json`.
 
         Returns:
-            Tupla (WifiInterfaceState, lista de eventos, fonte dos eventos, lista de erros).
+            Tupla (WifiInterfaceState, eventos, fonte, DriverInfo, lista de erros).
         """
         errors: list[str] = []
 
@@ -831,10 +841,16 @@ class PassiveCollector:
             self._macos_get_events(errors),
             name="macos_events",
         )
+        driver_task = asyncio.create_task(
+            self._macos_get_driver_info(errors),
+            name="macos_driver",
+        )
 
-        interface_state, events_tuple = await asyncio.gather(iface_task, events_task)
+        interface_state, events_tuple, driver_info = await asyncio.gather(
+            iface_task, events_task, driver_task
+        )
         events, events_source = events_tuple
-        return interface_state, events, events_source, errors
+        return interface_state, events, events_source, driver_info, errors
 
     async def _macos_get_interface_state(
         self, errors: list[str]
@@ -1307,6 +1323,206 @@ class PassiveCollector:
             count += 1
 
         return events
+
+    # -----------------------------------------------------------------------
+    # Driver Wi-Fi — Windows e macOS
+    # -----------------------------------------------------------------------
+
+    async def _windows_get_driver_info(
+        self, errors: list[str]
+    ) -> Optional[DriverInfo]:
+        """
+        Coleta informações do driver do adaptador Wi-Fi no Windows.
+
+        Usa `netsh wlan show drivers` — NÃO requer privilégios elevados.
+
+        Campos extraídos: adaptador, fabricante, versão, data, arquivo INF.
+        Calcula age_days e sinaliza is_outdated se o driver tiver mais de 730 dias.
+
+        Args:
+            errors: Lista mutável onde erros não-fatais são acrescentados.
+
+        Returns:
+            DriverInfo preenchido, ou None se o comando falhar.
+        """
+        raw = await self._run_subprocess(
+            ["netsh", "wlan", "show", "drivers"],
+            errors=[],
+        )
+        if not raw:
+            return DriverInfo(
+                collection_method="netsh_drivers",
+                error="netsh wlan show drivers: falhou ou retornou saída vazia",
+            )
+
+        parsed: dict[str, str] = {}
+        for line in raw.splitlines():
+            if ":" in line:
+                key_raw, _, value_raw = line.partition(":")
+                key = key_raw.strip().lower()
+                value = value_raw.strip()
+                if key and value:
+                    parsed[key] = value
+
+        # Windows PT-BR e EN
+        adapter_name = (
+            parsed.get("driver")
+            or parsed.get("driver name")
+            or parsed.get("driver                   ")
+            or None
+        )
+        # Percorrer chaves que contenham "driver" sem ser "date" ou "version"
+        if not adapter_name:
+            for k, v in parsed.items():
+                if "driver" in k and "date" not in k and "version" not in k and v:
+                    adapter_name = v
+                    break
+
+        provider = (
+            parsed.get("provider")
+            or parsed.get("vendor")
+            or parsed.get("fornecedor")
+            or None
+        )
+        version = parsed.get("version") or parsed.get("versão") or parsed.get("versao") or None
+        date_str = parsed.get("date") or parsed.get("data") or None
+        inf_file = parsed.get("inf file") or parsed.get("arquivo inf") or None
+
+        date_parsed, age_days, is_outdated = self._parse_driver_date(date_str)
+
+        return DriverInfo(
+            adapter_name=adapter_name,
+            provider=provider,
+            version=version,
+            date_str=date_str,
+            date_parsed=date_parsed,
+            age_days=age_days,
+            is_outdated=is_outdated,
+            inf_file=inf_file,
+            collection_method="netsh_drivers",
+        )
+
+    async def _macos_get_driver_info(
+        self, errors: list[str]
+    ) -> Optional[DriverInfo]:
+        """
+        Coleta informações do driver Wi-Fi no macOS via system_profiler.
+
+        Extrai a versão do software AirPort do JSON de SPAirPortDataType.
+        Não há "data de driver" explícita no macOS — usa a data de compilação
+        do sistema como referência quando disponível.
+
+        Args:
+            errors: Lista mutável onde erros não-fatais são acrescentados.
+
+        Returns:
+            DriverInfo preenchido, ou None se o comando falhar.
+        """
+        raw_json = await self._run_subprocess(
+            ["system_profiler", "SPAirPortDataType", "-json"],
+            timeout=20,
+            errors=[],
+        )
+        if not raw_json:
+            return DriverInfo(
+                collection_method="system_profiler",
+                error="system_profiler SPAirPortDataType: sem saída",
+            )
+
+        try:
+            data = json.loads(raw_json)
+            items = data.get("SPAirPortDataType", [])
+            if not items:
+                return None
+
+            item = items[0]
+
+            # Nome e versão da interface principal
+            ifaces = item.get("spairport_wireless_interfaces", [])
+            adapter_name: Optional[str] = None
+            version: Optional[str] = None
+
+            if ifaces:
+                iface = ifaces[0]
+                adapter_name = iface.get("_name")  # ex: "en0"
+                # Versão do driver/firmware
+                version = (
+                    iface.get("spairport_airport_software_version")
+                    or iface.get("spairport_firmware_version")
+                    or None
+                )
+
+            # Versão do software AirPort a nível do item raiz
+            if not version:
+                version = item.get("spairport_airport_software_version")
+
+            return DriverInfo(
+                adapter_name=adapter_name,
+                provider="Apple Inc.",
+                version=version,
+                date_str=None,
+                date_parsed=None,
+                age_days=None,
+                is_outdated=None,  # macOS gerencia drivers via atualizações de SO
+                collection_method="system_profiler",
+            )
+
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Falha ao parsear driver info macOS: %s", exc)
+            return DriverInfo(
+                collection_method="system_profiler",
+                error=f"Falha ao parsear system_profiler: {exc}",
+            )
+
+    @staticmethod
+    def _parse_driver_date(
+        date_str: Optional[str],
+    ) -> tuple[Optional[datetime], Optional[int], Optional[bool]]:
+        """
+        Parseia a data do driver em múltiplos formatos e calcula antiguidade.
+
+        Formatos suportados:
+        - MM/DD/YYYY  (padrão do Windows EN: "7/12/2023")
+        - YYYY-MM-DD  (ISO)
+        - DD/MM/YYYY  (PT-BR)
+        - M/D/YYYY    (variação do Windows)
+
+        Args:
+            date_str: String de data bruta do driver.
+
+        Returns:
+            Tupla (date_parsed, age_days, is_outdated).
+            is_outdated = True se age_days > 730 (≈2 anos).
+        """
+        if not date_str:
+            return None, None, None
+
+        date_parsed: Optional[datetime] = None
+        ds = date_str.strip()
+
+        # Tentar formatos conhecidos
+        formats = [
+            "%m/%d/%Y",   # 7/12/2023  (Windows EN)
+            "%Y-%m-%d",   # 2023-07-12 (ISO)
+            "%d/%m/%Y",   # 12/07/2023 (PT-BR)
+            "%m-%d-%Y",   # 07-12-2023
+            "%Y/%m/%d",   # 2023/07/12
+        ]
+        for fmt in formats:
+            try:
+                date_parsed = datetime.strptime(ds, fmt).replace(tzinfo=timezone.utc)
+                break
+            except ValueError:
+                continue
+
+        if date_parsed is None:
+            return None, None, None
+
+        now = datetime.now(tz=timezone.utc)
+        age_days = (now - date_parsed).days
+        is_outdated = age_days > 730  # mais de ~2 anos
+
+        return date_parsed, age_days, is_outdated
 
     # -----------------------------------------------------------------------
     # Utilitário assíncrono de subprocess

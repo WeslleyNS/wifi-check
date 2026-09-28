@@ -201,6 +201,46 @@ class DisconnectRecord:
 
 
 @dataclass
+class DriverInfo:
+    """
+    Informações sobre o driver do adaptador Wi-Fi da máquina.
+
+    Coletado via `netsh wlan show drivers` (Windows) ou
+    `system_profiler SPAirPortDataType` (macOS).
+    Verifica se o driver está desatualizado com base na data de lançamento.
+    """
+    adapter_name: Optional[str] = None
+    """Nome do adaptador Wi-Fi (ex: 'Intel(R) Wi-Fi 6E AX211 160MHz')."""
+
+    provider: Optional[str] = None
+    """Fabricante do driver (ex: 'Intel Corporation')."""
+
+    version: Optional[str] = None
+    """Versão do driver (ex: '22.230.0.5')."""
+
+    date_str: Optional[str] = None
+    """Data do driver como string original (ex: '7/12/2023', '2023-07-12')."""
+
+    date_parsed: Optional[datetime] = None
+    """Data do driver parseada para datetime (UTC). None se não foi possível parsear."""
+
+    age_days: Optional[int] = None
+    """Idade do driver em dias a partir da data de hoje."""
+
+    is_outdated: Optional[bool] = None
+    """True se o driver tem mais de 730 dias (~2 anos). None se não foi possível calcular."""
+
+    inf_file: Optional[str] = None
+    """Nome do arquivo INF do driver (Windows apenas)."""
+
+    collection_method: str = "unknown"
+    """Método de coleta: 'netsh_drivers' (Windows) ou 'system_profiler' (macOS)."""
+
+    error: Optional[str] = None
+    """Mensagem de erro, se a coleta falhou."""
+
+
+@dataclass
 class PassiveCollectionResult:
     """Resultado completo de um ciclo do Módulo 1 (coleta passiva)."""
     timestamp: datetime
@@ -217,6 +257,9 @@ class PassiveCollectionResult:
     Histórico de desconexões com causa identificada.
     Ordenado do mais recente para o mais antigo.
     """
+
+    driver_info: Optional[DriverInfo] = None
+    """Informações do driver do adaptador Wi-Fi (versão, data, status de atualização)."""
 
     events_source: str = "unknown"
     """Fonte dos eventos: 'wevtutil', 'powershell', 'sem_acesso', 'vazio'."""

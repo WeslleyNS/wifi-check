@@ -1,5 +1,5 @@
 """
-Utilitários de detecção de plataforma e privilégios.
+Utilitários de detecção de plataforma, privilégios e diretório de saída.
 
 Usados pelo main.py antes de instanciar qualquer módulo.
 Sem dependências de terceiros — apenas built-ins do Python 3.10+.
@@ -9,10 +9,17 @@ from __future__ import annotations
 
 import os
 import platform
-import sys
+from pathlib import Path
 
 from netdiag.models import Platform, PlatformInfo, PrivilegeInfo
 
+# Nome da pasta criada no Desktop para todos os arquivos do NetDiag
+NETDIAG_FOLDER_NAME = "NetDiag-Logs"
+
+
+# ---------------------------------------------------------------------------
+# Detecção de plataforma
+# ---------------------------------------------------------------------------
 
 def detect_platform() -> PlatformInfo:
     """
@@ -47,6 +54,10 @@ def detect_platform() -> PlatformInfo:
         )
 
 
+# ---------------------------------------------------------------------------
+# Verificação de privilégios
+# ---------------------------------------------------------------------------
+
 def check_privileges() -> PrivilegeInfo:
     """
     Verifica se o processo está rodando com privilégios elevados.
@@ -77,6 +88,105 @@ def check_privileges() -> PrivilegeInfo:
     return PrivilegeInfo(is_elevated=is_elevated, skipped_collections=skipped)
 
 
+# ---------------------------------------------------------------------------
+# Diretório de saída centralizado
+# ---------------------------------------------------------------------------
+
+def get_netdiag_logs_dir() -> Path:
+    """
+    Retorna e cria a pasta ``Desktop/NetDiag-Logs/`` para todos os arquivos.
+
+    Todo o conteúdo gerado pelo NetDiag (HTML, TXT, ZIP, JSONL) é salvo aqui,
+    permitindo compactar a pasta e enviar para análise sem precisar procurar
+    arquivos espalhados.
+
+    Resolução do Desktop (em ordem):
+    1. winreg  «User Shell Folders\\Desktop» (funciona com OneDrive corporativo).
+    2. ``%USERPROFILE%\\Desktop``
+    3. Variáveis de ambiente OneDrive + Desktop
+    4. ``~/Desktop``  (macOS / Linux)
+    5. ``~/`` (fallback universal)
+
+    Returns:
+        Path da pasta ``NetDiag-Logs`` já criada no disco.
+    """
+    desktop = _resolve_desktop()
+    logs_dir = desktop / NETDIAG_FOLDER_NAME
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    return logs_dir
+
+
+def _resolve_desktop() -> Path:
+    """
+    Detecta o caminho real do Desktop de forma multiplataforma.
+
+    Returns:
+        Path do Desktop do usuário atual.
+    """
+    system = platform.system().lower()
+    if system == "windows":
+        return _get_windows_desktop()
+    desktop = Path.home() / "Desktop"
+    return desktop if desktop.exists() else Path.home()
+
+
+def _get_windows_desktop() -> Path:
+    """
+    Obtém o caminho do Desktop no Windows, incluindo ambientes OneDrive.
+
+    Estratégia (em ordem de prioridade):
+    1. winreg — «User Shell Folders\\Desktop» (fonte oficial do Windows).
+    2. ``%USERPROFILE%\\Desktop``
+    3. OneDriveConsumer / OneDriveCommercial / OneDrive + Desktop
+    4. ``Path.home()``
+
+    Returns:
+        Path do Desktop do Windows.
+    """
+    # 1. Registro do Windows (suporta OneDrive corporativo)
+    try:
+        import winreg  # type: ignore[import]
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders",
+        )
+        desktop_raw, _ = winreg.QueryValueEx(key, "Desktop")
+        winreg.CloseKey(key)
+        import ctypes
+        buf = ctypes.create_unicode_buffer(32767)
+        ctypes.windll.kernel32.ExpandEnvironmentStringsW(  # type: ignore[attr-defined]
+            str(desktop_raw), buf, 32767
+        )
+        desktop = Path(buf.value)
+        if desktop.exists():
+            return desktop
+    except Exception:  # noqa: BLE001
+        pass
+
+    # 2. USERPROFILE\Desktop
+    user_profile = os.environ.get("USERPROFILE", "")
+    if user_profile:
+        desktop = Path(user_profile) / "Desktop"
+        if desktop.exists():
+            return desktop
+
+    # 3. OneDrive + Desktop
+    for env_var in ("OneDriveConsumer", "OneDriveCommercial", "OneDrive"):
+        onedrive = os.environ.get(env_var, "")
+        if onedrive:
+            for desktop_name in ("Desktop", "Área de Trabalho"):
+                desktop = Path(onedrive) / desktop_name
+                if desktop.exists():
+                    return desktop
+
+    # 4. Fallback
+    return Path.home()
+
+
+# ---------------------------------------------------------------------------
+# Helpers internos
+# ---------------------------------------------------------------------------
+
 def _check_elevated() -> bool:
     """
     Verifica elevação de privilégio de forma multiplataforma.
@@ -87,12 +197,10 @@ def _check_elevated() -> bool:
     system = platform.system().lower()
     if system == "windows":
         return _check_elevated_windows()
-    else:
-        # macOS / Linux
-        try:
-            return os.geteuid() == 0  # type: ignore[attr-defined]
-        except AttributeError:
-            return False
+    try:
+        return os.geteuid() == 0  # type: ignore[attr-defined]
+    except AttributeError:
+        return False
 
 
 def _check_elevated_windows() -> bool:

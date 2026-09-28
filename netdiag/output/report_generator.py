@@ -25,6 +25,7 @@ from netdiag.models import (
     PlatformInfo,
     VerdictCode,
 )
+from netdiag.utils.platform import get_netdiag_logs_dir
 
 logger = logging.getLogger("netdiag.output.report_generator")
 
@@ -125,82 +126,24 @@ class ReportGenerator:
 
     def _resolve_output_dir(self, output_dir: Optional[str]) -> Path:
         """
-        Resolve o diretório de saída, com fallback automático.
+        Resolve o diretório de saída dos relatórios.
 
-        Windows: respeita OneDrive (não assume C:/Users/<user>/Desktop).
-        macOS  : usa ~/Desktop, com fallback para ~/ se não existir.
+        Se ``output_dir`` for fornecido, usa esse caminho.
+        Caso contrário, usa ``Desktop/NetDiag-Logs/`` (criado automaticamente),
+        que é a pasta central para todos os arquivos gerados pelo NetDiag.
 
         Args:
             output_dir: Caminho fornecido pelo usuário (ou None para padrão).
 
         Returns:
-            Path do diretório de saída.
+            Path do diretório de saída (já criado no disco).
         """
         if output_dir:
-            return Path(output_dir)
+            p = Path(output_dir)
+            p.mkdir(parents=True, exist_ok=True)
+            return p
 
-        if self.platform.name == Platform.WINDOWS:
-            return self._get_windows_desktop()
-        else:
-            desktop = Path.home() / "Desktop"
-            return desktop if desktop.exists() else Path.home()
-
-    def _get_windows_desktop(self) -> Path:
-        """
-        Obtém o caminho correto do Desktop no Windows, respeitando OneDrive.
-
-        Estratégia (em ordem de prioridade):
-        1. winreg — lê "User Shell Folders\\Desktop" (fonte de verdade do Windows).
-           Funciona com OneDrive corporativo (ex: "Área de Trabalho" no OneDrive).
-        2. Variável USERPROFILE/Desktop (fallback para ambiente sem winreg).
-        3. OneDriveConsumer/Commercial + Desktop.
-        4. Path.home()
-
-        Returns:
-            Path do Desktop do Windows.
-        """
-        # 1. Fonte de verdade: registro do Windows
-        try:
-            import winreg  # type: ignore[import]
-            key = winreg.OpenKey(
-                winreg.HKEY_CURRENT_USER,
-                r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders",
-            )
-            desktop_raw, _ = winreg.QueryValueEx(key, "Desktop")
-            winreg.CloseKey(key)
-            # Expandir variáveis de ambiente (ex: %USERPROFILE%)
-            import ctypes
-            buf = ctypes.create_unicode_buffer(32767)
-            ctypes.windll.kernel32.ExpandEnvironmentStringsW(  # type: ignore[attr-defined]
-                str(desktop_raw), buf, 32767
-            )
-            desktop = Path(buf.value)
-            if desktop.exists():
-                logger.debug("Desktop via winreg: %s", desktop)
-                return desktop
-        except Exception:  # noqa: BLE001
-            pass
-
-        # 2. USERPROFILE/Desktop
-        user_profile = os.environ.get("USERPROFILE", "")
-        if user_profile:
-            desktop = Path(user_profile) / "Desktop"
-            if desktop.exists():
-                return desktop
-
-        # 3. OneDrive + Desktop
-        for env_var in ("OneDriveConsumer", "OneDriveCommercial", "OneDrive"):
-            onedrive = os.environ.get(env_var, "")
-            if onedrive:
-                for desktop_name in ("Desktop", "Área de Trabalho"):
-                    desktop = Path(onedrive) / desktop_name
-                    if desktop.exists():
-                        return desktop
-
-        # 4. Fallback: home do usuário
-        fallback = Path.home()
-        logger.warning("Desktop não encontrado. Usando fallback: %s", fallback)
-        return fallback
+        return get_netdiag_logs_dir()
 
     # -----------------------------------------------------------------------
     # HTML autocontido
