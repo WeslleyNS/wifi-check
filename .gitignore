@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+.Python
+
+# Ambientes virtuais
+.venv/
+venv/
+env/
+ENV/
+
+# Build / PyInstaller
+build/
+dist/
+*.spec.bak
+*.egg-info/
+*.egg
+MANIFEST
+
+# Relatórios gerados em runtime (não versionar)
+netdiag-report-*.html
+netdiag-report-*.txt
+netdiag-report-*.zip
+netdiag-collect*.jsonl
+netdiag-collect*.jsonl.*
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Logs
+*.log
