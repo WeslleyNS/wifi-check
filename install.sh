@@ -39,16 +39,16 @@ echo -e "${GREEN}✔ $PY_VER detectado${NC}"
 # ---------------------------------------------------------------------------
 # 2. Baixar o projeto
 # ---------------------------------------------------------------------------
-VERSION="v0.1.0"
+VERSION="main"
 EXPECTED_HASH="" # Opcional: preencha com hash SHA256 do ZIP para habilitar validação rigorosa
 
 TMP_DIR=$(mktemp -d)
 ZIP_PATH="$TMP_DIR/netdiag.zip"
-FOLDER_NAME="wifi-check-${VERSION#v}"
+FOLDER_NAME="wifi-check-main"
 PROJECT_DIR="$TMP_DIR/$FOLDER_NAME"
 
-echo -e "${YELLOW}⬇  Baixando NetDiag Agent $VERSION do GitHub...${NC}"
-DOWNLOAD_URL="https://github.com/WeslleyNS/wifi-check/archive/refs/tags/$VERSION.zip"
+echo -e "${YELLOW}⬇  Baixando NetDiag Agent do GitHub (branch main)...${NC}"
+DOWNLOAD_URL="https://github.com/WeslleyNS/wifi-check/archive/refs/heads/main.zip"
 curl -fsSL "$DOWNLOAD_URL" -o "$ZIP_PATH"
 
 if [ -n "$EXPECTED_HASH" ]; then

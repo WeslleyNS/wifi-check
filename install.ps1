@@ -34,17 +34,17 @@ Write-Host ("Python detectado: " + $pyVersion) -ForegroundColor Green
 # ---------------------------------------------------------------------------
 # 2. Baixar o projeto
 # ---------------------------------------------------------------------------
-$VERSION = "v0.1.0"
+$VERSION = "main"
 $EXPECTED_HASH = "" # Opcional: preencha com o hash SHA256 do ZIP para habilitar validacao rigorosa
 
 $tmpDir = Join-Path $env:TEMP ("netdiag-" + (Get-Random))
 New-Item -ItemType Directory -Path $tmpDir | Out-Null
 $zipPath = Join-Path $tmpDir "netdiag.zip"
-$folderName = "wifi-check-" + $VERSION.TrimStart('v')
+$folderName = "wifi-check-main"
 $projectDir = Join-Path $tmpDir $folderName
 
-Write-Host "Baixando NetDiag Agent $VERSION do GitHub..." -ForegroundColor Yellow
-$downloadUrl = "https://github.com/WeslleyNS/wifi-check/archive/refs/tags/$VERSION.zip"
+Write-Host "Baixando NetDiag Agent do GitHub (branch main)..." -ForegroundColor Yellow
+$downloadUrl = "https://github.com/WeslleyNS/wifi-check/archive/refs/heads/main.zip"
 try {
     Invoke-WebRequest -Uri $downloadUrl -OutFile $zipPath -UseBasicParsing
 } catch {
